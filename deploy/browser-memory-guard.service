@@ -1,0 +1,19 @@
+# /etc/systemd/system/browser-memory-guard.service
+[Unit]
+Description=Browser memory guard (sacrifice the browser under memory pressure)
+After=network.target browser-relay.service
+Wants=browser-relay.service
+
+[Service]
+Type=simple
+Environment=MIN_AVAILABLE_KB=350000
+Environment=MIN_SWAP_FREE_KB=131072
+Environment=COOLDOWN_SECONDS=120
+ExecStart=/usr/local/bin/browser-memory-guard.sh
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/browser-memory-guard.log
+StandardError=append:/var/log/browser-memory-guard.log
+
+[Install]
+WantedBy=multi-user.target

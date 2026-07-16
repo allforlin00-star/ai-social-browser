@@ -1,0 +1,7 @@
+profile/
+venv/
+.env
+.relay.pid
+__pycache__/
+*.log
+.bak*/
