@@ -1,0 +1,17 @@
+[Unit]
+Description=Read-only Xiaohongshu Playwright HTTP wrapper
+After=network-online.target browser-relay.service
+Wants=browser-relay.service
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/ai-social-browser/actions/xiaohongshu-tool
+# 服务没有鉴权：只绑回环或内网地址，绝对不要绑公网网卡
+ExecStart=/opt/ai-social-browser/actions/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8273
+# Environment=XHS_CDP_URL=http://127.0.0.1:9333
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

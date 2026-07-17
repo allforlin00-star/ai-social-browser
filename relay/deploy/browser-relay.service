@@ -1,5 +1,5 @@
 # /etc/systemd/system/browser-relay.service
-# 路径按你的实际安装位置改（这里假设装在 /opt/browser-relay，venv 在其下）
+# 路径按你的实际安装位置改（这里假设仓库克隆在 /opt/ai-social-browser，venv 在 relay/ 下）
 [Unit]
 Description=Browser Relay headed Chrome over CDP
 After=network-online.target
@@ -8,9 +8,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/opt/browser-relay
+WorkingDirectory=/opt/ai-social-browser/relay
 EnvironmentFile=/etc/browser-relay.env
-ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x960x24" /opt/browser-relay/venv/bin/python /opt/browser-relay/relay.py
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x960x24" /opt/ai-social-browser/relay/venv/bin/python /opt/ai-social-browser/relay/relay.py
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM

@@ -1,74 +1,71 @@
-# browser-relay
+# 给你的 agent 一个能刷社交平台的浏览器
 
-在一台机器上跑一个**真正带界面的 Chrome**，手机浏览器就是它的屏幕和触摸板；同一个浏览器同时开放 CDP 端口给 Playwright 等自动化工具——**人和脚本共用同一个现场、同一份登录态**。
+从零开始,搭一台**人和 AI 共用的常驻浏览器**:你用手机遥控它注册登录、养号、过验证码;你的 agent 通过几个 HTTP 动作用它刷推特/小红书,拿到的是结构化 JSON。全程复用同一份真实登录态——不导出 cookie、不存密码、不给 agent 碰凭据。
 
-单文件 Python（约 450 行）+ 两个静态页面，唯一依赖是 `websockets`。没有 Docker、没有前端构建、没有数据库。
+一个前提先说清:**你得已经有一个会调 HTTP 工具的 agent**(Claude Code、任何能执行 curl 的 agent 框架都算)。本指南不教怎么搭 agent——连 agent 都还没有的话,先别急着让 AI 刷社交平台。
 
-## 为什么要这个东西
+仓库就两块积木:
 
-- **自动化卡壳时人来接力**：脚本跑一半撞上验证码 / 扫码登录 / 风控弹窗，掏出手机点一下，脚本接着跑。反过来也一样——你手动登录一次，之后所有自动化都带着这份登录态。
-- **登录态养在服务器上**：cookie 存在服务器的 Chrome profile 里，换手机、换电脑都不用重新登录。
-- **手机上的"云浏览器"**：访问只有服务器可达的内网服务；或者单纯把重网页的 CPU/流量开销扔给服务器，手机只收 jpeg 流。
-
-## 为什么是 headed 浏览器 + 人工接管
-
-一句话定位：**同样的操作，让脚本纯自动去点容易被网站风控盯上，让真人在同一个浏览器上手动接管一下，往往会稳一点。** 别指望它把风控变透明——只是比纯自动化好一些。两点原因：
-
-**1. headed 真浏览器的指纹更像真人。** 无头浏览器有一堆藏不住的破绽——`navigator.webdriver` 标志、缺插件、WebGL / 字体渲染和真机对不上、UA 里带 Headless。本项目跑的是**带界面的真 Chrome**（服务器上靠 xvfb 撑一块虚拟屏幕），用一份**长期养着的 profile**（cookie、历史、登录态都在），并关掉了 `AutomationControlled` 标志。在网站眼里，这更接近"一个老用户在自己电脑上开的 Chrome"，而不是刚冒出来的无头爬虫。
-
-**2. 同一个浏览器，只是换了操作的人——风控打的其实是"行为"。** 这里有个反直觉但很实在的点：手机遥控和 Playwright 可以驱动**同一个** Chrome，指纹、IP、登录态、连自动化标志都一模一样。可就算一切相同，脚本一动容易被风控、人手动点却往往没事。差别只剩两处：一是**节奏**——人会停顿、会先滑两下看看、时机是乱的，脚本是动作贴动作、又匀又快；二是**捷径**——脚本爱直接把值塞进输入框、让元素跳到眼前、注入 JS 或直接跳 URL，把人操作时那串自然的按键、聚焦、滚动事件全跳过了，风控一看就是"没有来龙去脉"。所以撞上滑块、验证码、短信验证、异常登录二次确认时，掏出手机在同一个会话里手动过一遍，比让脚本硬闯稳。
-
-> 一句实话别误会：遥控时手机上的点按最终也是经 CDP 合成事件打进去的，不是操作系统级的真实触摸，指纹层面它并不等于"真人手指"（严格说它连真实的鼠标滑动轨迹都没有）。它比纯自动化好，好在**节奏是人的** + **会话连续不重开** + **不走脚本那些捷径**。正确姿势是：**能自动就自动，撞墙了人接一下**，把风险最高的那几步交给人。
-
-## 架构
+| 目录 | 是什么 | 详细文档 |
+|---|---|---|
+| [`relay/`](relay/README.md) | 常驻 headed Chrome + 手机遥控:画面推流到手机,触摸/键盘打回去。人和脚本共用同一个浏览器、同一份登录态 | 含风控定位、安全模型、踩坑史 |
+| [`actions/`](actions/README.md) | 把刷推特/小红书包成 `feed / read / like / reply / post` 这样的动词,HTTP 服务。agent 只拿动词,不拿浏览器 | 含动作参考(就是喂给 agent 的工具说明)、踩坑史 |
 
 ```mermaid
 flowchart LR
-    Phone[手机浏览器] -- "画面推流 / 触摸键盘回传 (WebSocket)" --> Relay["relay.py :8271"]
-    PW[Playwright / 自动化脚本] -- CDP --> Chrome
-    Relay -- "CDP WebSocket (:9333)" --> Chrome["headed Chrome<br/>(xvfb 虚拟屏幕)"]
+    Phone[你的手机] -- "画面/触摸 (WebSocket)" --> Relay["relay :8271"]
     CF[cloudflared 隧道] --> Relay
+    Relay -- CDP --> Chrome["常驻 headed Chrome<br/>(xvfb 虚拟屏幕)"]
+    Agent[你的 agent] -- "HTTP JSON" --> T["twitter-tool :8272"]
+    Agent -- "HTTP JSON" --> X["xiaohongshu-tool :8273"]
+    T -- CDP --> Chrome
+    X -- CDP --> Chrome
+    Chrome --> XC[x.com]
+    Chrome --> XH[xiaohongshu.com]
 ```
 
-工作原理一句话：relay 用 CDP 的 `Page.startScreencast` 把页面帧拿出来推给手机，手机的触摸/滚动/键盘事件转成 CDP 的 `Input.dispatch*` 打回去。手机端是一个纯静态页面，密码登录后即用，无需装任何 App。
+## ⚠️ 先读这五条(安全与风险)
 
-支持：点按、滚动、软键盘输入、地址栏、前进后退刷新、**多标签页切换**、横竖屏自适应。
+1. **必须用专门小号,绝不能拿主号。** 自动化操作违反 X / 小红书的服务条款,有封号风险,后果自负。
+2. **CDP 端口(9333)绝不能出 `127.0.0.1`。** 它没有任何鉴权,谁碰到它,谁就拥有浏览器里一切网站的登录态。
+3. **动作服务(8272/8273)没有鉴权,只绑回环或内网。** 谁能访问端口,谁就能用你的账号发推。跨机器调用要套带鉴权的反代或走内网。
+4. **relay(8271)不裸暴露公网。** 走 cloudflare tunnel 之类的隧道加 TLS,密码必须强——登录没有防爆破,这道门就是全部。
+5. **频率闸的默认值故意很小**(每小时发帖 ≤5、互动 ≤20)。这套东西是给"个人 agent 顺手刷刷"设计的,不做多账号、不做代理池、不做验证码破解——那些是刷量工具的需求,不是本项目的。
 
-## 快速开始（本地）
+## 全流程
+
+### Step 0 — 给 AI 开个专号
+
+正常用手机注册一个 x.com / 小红书小号,和平时注册没有任何区别。两个理由必须专号:一是封号风险隔离,二是 agent 能看到这个账号的一切,别把主号的私信、关注关系喂进去。
+
+新号别注册完立刻挂自动化。先当正常用户刷几天——风控看的是行为,一个刚出生就 API 节奏刷屏的号,和一个人手养过几天的号,待遇不一样。
+
+### Step 1 — 起 relay(那台常驻浏览器)
+
+在 VPS 上部署(2GB 内存的小机实测够用;本地 Mac/Linux 想先试跑,见 [`relay/README.md`](relay/README.md) 的快速开始):
 
 ```bash
-pip3 install websockets
-BROWSER_RELAY_PASS=你的密码 python3 relay.py
-# 或用 ./start.sh 后台跑，./stop.sh 停
-```
-
-Mac 和 Linux 桌面环境直接可用（自动探测 Chrome / Chromium 路径，Mac 上会自动把 Chrome 窗口最小化）。默认只监听 `127.0.0.1:8271`；想让同一局域网的手机连，设 `BROWSER_RELAY_HOST=0.0.0.0`——但注意这是裸 HTTP，密码哈希会明文过网，**只能在可信局域网这么干**，公网必须走下面的隧道方案。
-
-## VPS 部署（systemd + xvfb，2GB 小机实测）
-
-```bash
-# 1. 依赖：xvfb + Chrome（chromium 也行）
+# 1. 依赖:xvfb + Chrome(chromium 也行)
 sudo apt install -y xvfb
-# google-chrome-stable 按官方源装，或 apt install chromium-browser
+# google-chrome-stable 按官方源装,或 apt install chromium-browser
 
 # 2. 代码 + venv
-sudo mkdir -p /opt/browser-relay && sudo chown $USER /opt/browser-relay
-cd /opt/browser-relay && git clone <本仓库> . 
+sudo mkdir -p /opt/ai-social-browser && sudo chown $USER /opt/ai-social-browser
+git clone https://github.com/blueberriely/ai-social-browser /opt/ai-social-browser
+cd /opt/ai-social-browser/relay
 python3 -m venv venv && venv/bin/pip install -r requirements.txt
 
-# 3. 配置（务必设强密码）
+# 3. 配置(务必设强密码)
 sudo cp .env.example /etc/browser-relay.env && sudo vim /etc/browser-relay.env
 
-# 4. systemd
+# 4. systemd(unit 里的 User 和路径按你的实际情况改)
 sudo cp deploy/browser-relay.service /etc/systemd/system/
 sudo mkdir -p /etc/systemd/system/browser-relay.service.d
 sudo cp deploy/resource-limits.conf /etc/systemd/system/browser-relay.service.d/
 sudo systemctl daemon-reload && sudo systemctl enable --now browser-relay
 ```
 
-### 公网访问：cloudflare tunnel
-
-8271 端口永远只绑 `127.0.0.1`，TLS 和公网入口交给隧道：
+公网入口交给隧道,8271 永远只绑 `127.0.0.1`:
 
 ```yaml
 # cloudflared config.yml
@@ -80,52 +77,74 @@ ingress:
   - service: http_status:404
 ```
 
-跑的时候建议 `cloudflared tunnel run --protocol http2`（实测比默认的 QUIC 在部分 VPS 网络上更稳）。手机访问 `https://browser.example.com`，输一次密码，30 天内免登录。
+跑的时候建议 `cloudflared tunnel run --protocol http2`(实测比默认的 QUIC 在部分 VPS 网络上更稳)。
 
-### 内存守护（可选，小内存机器强烈建议）
+小内存机器强烈建议再装一层内存守护(内存快见底时牺牲浏览器保全机器),见 [`relay/README.md`](relay/README.md) 的内存守护章节。
 
-Chrome 在 2GB 的机器上是随时会把整台机器拖死的主。两层保险：
+### Step 2 — 手机连上,人工登录
 
-1. `deploy/resource-limits.conf`——systemd 层面给浏览器画红线（超限就停掉重启，牺牲浏览器保全机器）；
-2. `deploy/browser-memory-guard.sh` + `.service`——盯着 MemAvailable/SwapFree，快见底时先杀最能吃的自动化进程、再重启浏览器服务。脚本里默认牺牲的是 playwright，换成你自己机器上的大户。
+手机浏览器打开 `https://browser.example.com`,输一次密码,30 天免登录。你现在看到的就是服务器上那个 Chrome 的画面,点按、滚动、打字都行。
 
-数值都是按 2GB 内存机器给的，**不可照抄**，按你的机器调。
+在里面登录 x.com 和小红书。**所有验证码、短信、扫码,都在这一步由人做掉**——这正是整套方案不碰 cookie 导出、不存密码的原因:登录这件事永远由人在浏览器里完成。登录态从此养在服务器的 Chrome profile 里,换手机换电脑都不丢。
 
-## 和 Playwright 共享浏览器
+平时偶尔拿它当普通浏览器刷两下也行,人的使用痕迹本身就是养号的一部分。
 
-```python
-browser = playwright.chromium.connect_over_cdp("http://127.0.0.1:9333")
+### Step 3 — 起动作服务
+
+```bash
+cd /opt/ai-social-browser/actions
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+# 不需要 playwright install:只连现成浏览器,不下载/启动自己的浏览器
 ```
 
-脚本和手机看到的是同一个浏览器：脚本开的标签页你手机上能切过去接管，你手动登录过的站点脚本直接是登录态。
+先手动跑通、冒烟:
 
-## 安全模型（必读）
+```bash
+cd twitter-tool
+../venv/bin/uvicorn app:app --host 127.0.0.1 --port 8272 &
 
-- **登录**：手机端把密码做 sha256 后发给服务器，服务器验证通过后下发另一个派生值作为 **HttpOnly** cookie（30 天）。页面里的 JS 读不到这个 cookie；恶意网页就算把标签页标题设成一段脚本，也只会被当纯文本渲染。改密码 = 所有已登录设备立刻失效。
-- **三条铁律**：
-  1. **CDP 端口（9333）绝不能出 `127.0.0.1`**。它没有任何鉴权，谁碰到它，谁就拥有这个浏览器里的一切——所有网站的登录态、所有 cookie。
-  2. 8271 不要裸暴露公网，走 cloudflare tunnel 或自己的反代加 TLS。
-  3. 密码必须强：登录没有防爆破，这道门就是全部。
+curl -s localhost:8272/health
+# {"ok": true, "tabs": ..., "owned_pages": 0, ...}
 
-## 踩坑史
+curl -s localhost:8272/twitter -X POST -H 'content-type: application/json' \
+  -d '{"action":"feed","n":5}'
+# 应该返回你时间线上的 5 条推文,结构化 JSON
+```
 
-按踩的顺序，每一条都付过学费：
+小红书同理(`xiaohongshu-tool` 目录,端点 `POST /xiaohongshu`)。冒烟通过后转 systemd 长期跑:
 
-1. **`/dev/shm` 太小，标签页秒崩**。Linux 上必须 `--disable-dev-shm-usage`（还有 `--no-sandbox`，无桌面环境跑不起 sandbox）。代码里对 Linux 自动加了。
-2. **推流一分钟后卡成幻灯片**。xvfb 里的窗口在 Chrome 眼里永远"不可见"，会被后台节流三连（渲染降频、定时器降频、occluded 窗口不画）。三个 `--disable-background*` / `--disable-backgrounding-*` 开关全关掉才恢复。
-3. **收几帧就没了**。`Page.screencastFrame` 每一帧都必须回 `screencastFrameAck`，不回的话 Chrome 认为你消化不动，直接停止推帧。
-4. **切标签页 = 换一条 CDP 连接**。CDP 的页面级 WebSocket 是一个标签页一条，切标签是断开重连另一条；标签页被关掉连接就死，必须有自动重连兜底，不然手机上就是永久黑屏。
-5. **iOS Safari 不允许凭空弹软键盘**。页面里藏一个 1px 的隐形 input，点按画面后 focus 它来接键盘输入，再把输入事件转成 CDP 打过去。
-6. **xvfb-run 要加 `-a`**。自动挑空闲的 display 号，不然重启撞 display 直接起不来。
-7. **Chrome 在 2GB 机器上会拖死整台机**。见上面的内存守护两层保险；`OOMPolicy=stop` + `Restart=always` 的组合意思是"宁可浏览器重启 30 秒，不能让 SSH 都连不上"。
-8. **日志里 dbus / GCM 报错刷屏是正常的**。无桌面总线环境 Chrome 就是会一直抱怨 `Failed to connect to the bus`，不影响任何功能，不用修。
+```bash
+sudo cp /opt/ai-social-browser/actions/systemd/*.service /etc/systemd/system/
+# 改 unit 里的 YOUR_USER 和路径
+sudo systemctl daemon-reload && sudo systemctl enable --now twitter-tool xiaohongshu-tool
+```
 
-## 已知限制
+### Step 4 — 接上你的 agent
 
-- 单密码单用户，无防爆破（靠强密码 + 隧道）。
-- 声音不传，只有画面。
-- 不支持多指手势（捏合缩放）。
-- 文件上传/下载对话框是系统级窗口，xvfb 里没法交互。
+到这一步,接线只剩一段话的事:**把 [`actions/README.md`](actions/README.md) 里「twitter-tool 动作参考」和「xiaohongshu-tool 动作参考」两章原样贴进你 agent 的工具说明**(系统提示、CLAUDE.md、tool description,随你的框架),再告诉它服务地址。agent 会发 HTTP 请求就够了:
+
+```bash
+curl -s localhost:8272/twitter -X POST -H 'content-type: application/json' \
+  -d '{"action":"like","url":"https://x.com/.../status/..."}'
+```
+
+有一条务必一起喂给 agent:**写动作返回 `uncertain` 时禁止自动重试**,那表示"可能已经发出去但没验证上",重试就是重复发帖。三态设计的完整说明在 actions 文档里。
+
+### Step 5 — 撞墙了,人来接管(这套东西的灵魂)
+
+agent 迟早会撞上验证码、滑块、"异常登录"二次确认、或者干脆掉登录。这时候不用改任何代码:**掏出手机,打开 relay,你看到的就是 agent 卡住的那个页面,手动把它点过去,agent 接着跑。**同一个浏览器、同一个会话,只是操作的人换了一下——把风险最高的几步交给人,是这套方案对风控唯一诚实的答案(它不能让你隐身,细节见 relay 文档里的风控定位)。
+
+症状对照(掉登录/超时/频率闸/uncertain 分别怎么处理),见 [`actions/README.md`](actions/README.md) 的失败路径速查表。
+
+## 现实预期
+
+- **内存是最紧的资源。** 2GB 小机跑得动,但 Chrome 同时开两个社交平台页面就已经很紧张,再多就卡。动作服务默认掐掉图片/媒体加载省内存,资源红线和内存守护把"最坏情况"控制在浏览器重启 30 秒,不会拖死机器。
+- 别拿它当日常主力浏览器。顺手刷刷可以,重度浏览它会卡给你看。
+- 页面选择器绑的是 2026-07 的站点结构,平台改版后读动作会以"等待超时"的形式明确失败,不会静默返回错数据。
+
+## relay 顺手还能干嘛
+
+它本身是个独立成立的东西:一台养在服务器上的"手机云浏览器"——访问只有服务器可达的内网服务、把重网页的 CPU/流量开销扔给服务器、登录态跨设备共用。细节见 [`relay/README.md`](relay/README.md)。
 
 ## License
 
