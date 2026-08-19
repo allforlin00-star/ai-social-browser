@@ -360,7 +360,7 @@ async def new_page(ctx, block_images=True):
         _persist_state()
 
         await page.set_viewport_size({"width": 1100, "height": 1300})
-        page.set_default_timeout(15000)
+        page.set_default_timeout(45000)
 
         # 列表页默认省流；点进详情时会在同一页重新放行图片。
         await _configure_page_resources(page, block_images)
@@ -591,7 +591,7 @@ async def wait_tweets(page):
     """等推文出现；区分「没登录」「空结果」「真超时」。"""
     await _raise_if_challenge(page)
     try:
-        await page.wait_for_selector('article[data-testid="tweet"]', timeout=15000)
+        await page.wait_for_selector('article[data-testid="tweet"]', timeout=60000)
         await _raise_if_challenge(page)
         return None
     except PWTimeout:
@@ -636,7 +636,7 @@ async def collect_tweets(page, n):
 async def goto(page, url):
     _touch_owned_page(page)
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
     except PWTimeout:
         await _raise_if_challenge(page)
         raise
@@ -661,7 +661,7 @@ async def _open_search_via_ui(page, query, latest=False):
     await _human_type(page, query)
     await page.keyboard.press("Enter")
     try:
-        await page.wait_for_url(re.compile(r"/search(?:\?|$)"), timeout=15000)
+        await page.wait_for_url(re.compile(r"/search(?:\?|$)"), timeout=60000)
     except PWTimeout:
         await _raise_if_challenge(page)
         raise
@@ -799,7 +799,7 @@ async def act_read(ctx, body):
                     await page.wait_for_function(
                         "sid => location.pathname.includes('/status/' + sid)",
                         arg=sid,
-                        timeout=15000,
+                        timeout=60000,
                     )
                 except PWTimeout:
                     await _raise_if_challenge(page)
@@ -1026,6 +1026,9 @@ async def act_reply(ctx, body):
         if tweet_id and await _verify_created_tweet(page, tweet_id, text):
             return _confirmed("回复已按 tweet id 二次读取确认", tweet_id=tweet_id,
                               network=_network_public(network))
+        if network.get("captured") and 200 <= int(network.get("status") or 0) < 300:
+            return _confirmed("X 接口返回 2xx(未解析到 id,按接口结果认发送成功)",
+                              tweet_id=tweet_id, network=_network_public(network))
         return _uncertain("发送动作已发生，但没有拿到可二次确认的回复，禁止自动重试",
                           tweet_id=tweet_id, network=_network_public(network))
     finally:
@@ -1041,12 +1044,7 @@ async def act_post(ctx, body):
         await goto(page, f"{BASE}/home")
         if not await check_logged_in(page):
             return _failed("登录态失效")
-        compose = page.locator(
-            '[data-testid="SideNav_NewTweet_Button"]:visible, '
-            'a[href="/compose/post"]:visible'
-        ).first
-        await compose.wait_for(timeout=12000)
-        await _guarded_click(page, compose)
+        await goto(page, f"{BASE}/compose/post")
         await page.locator('[data-testid="tweetTextarea_0"]').first.wait_for(
             timeout=12000
         )
@@ -1061,6 +1059,9 @@ async def act_post(ctx, body):
         if tweet_id and await _verify_created_tweet(page, tweet_id, text):
             return _confirmed("新推文已按 tweet id 二次读取确认", tweet_id=tweet_id,
                               network=_network_public(network))
+        if network.get("captured") and 200 <= int(network.get("status") or 0) < 300:
+            return _confirmed("X 接口返回 2xx(未解析到 id,按接口结果认发送成功)",
+                              tweet_id=tweet_id, network=_network_public(network))
         return _uncertain("发送动作已发生，但没有拿到可二次确认的新推文，禁止自动重试",
                           tweet_id=tweet_id, network=_network_public(network))
     finally:
