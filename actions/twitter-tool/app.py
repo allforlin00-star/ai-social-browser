@@ -1111,6 +1111,22 @@ async def act_post(ctx, body):
         await page.locator('[data-testid="tweetTextarea_0"]').first.wait_for(
             timeout=12000
         )
+        # 发推带图(feat-post-image,裸补丁转正):image_path 不认时以前会静默发成纯文字
+        image_path = str(body.get("image_path") or "").strip()
+        if image_path:
+            p = Path(image_path)
+            if not p.is_file():
+                return _failed(f"图片不存在: {image_path}")
+            if p.suffix.lower().lstrip(".") not in ("jpg", "jpeg", "png", "gif", "webp"):
+                return _failed("图片格式只认 jpg/png/gif/webp")
+            if p.stat().st_size > 5 * 1024 * 1024:
+                return _failed("图片超过 5MB")
+            await page.locator('input[data-testid="fileInput"]').first.set_input_files(str(p))
+            try:
+                await page.locator('[data-testid="attachments"]').first.wait_for(timeout=20000)
+            except PWTimeout:
+                await _raise_if_challenge(page)
+                return _failed("图片没挂上(附件预览没出现),推文没有发送")
         sent = await _type_and_send(page, text, "tweetButton")
         if sent.get("error"):
             return _failed(sent["error"])
