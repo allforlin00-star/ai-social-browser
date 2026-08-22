@@ -11,6 +11,7 @@ POST /twitter  body: {"action": "...", ...}
   repost  [url]
   reply   [url, text]
   post    [text]
+  shot    [url]                  截图：推文链接=拍推文卡片，其它 x.com 页=拍整个视口
 
 并发：读写共享总上限 2（标签页池），写操作另有全局串行锁 + 频率闸。
 所有写操作记录到 actions.log。
@@ -831,6 +832,49 @@ async def act_read(ctx, body):
         await _close_owned_page(page)
 
 
+async def act_shot(ctx, body):
+    """叼石头截图(feat-stone-shot,原 VPS 裸补丁转正):把推文拍成 PNG 落盘,
+    返回 path 给调用方(pando-bridge 的 stone_shot.py)自取。纯读取,不进频率闸。"""
+    url = (body.get("url") or "").strip()
+    sid = _status_id(url)
+    page = await new_page(ctx, block_images=False)
+    try:
+        if sid:
+            await goto(page, f"{BASE}/i/status/{sid}")
+            err = await wait_tweets(page)
+            if err:
+                return {"ok": False,
+                        "error": "推文不存在或已删除" if err == "EMPTY" else err}
+            art = page.locator('article[data-testid="tweet"]').filter(
+                has=page.locator(f'a[href*="/status/{sid}"]')).first
+            try:
+                await art.wait_for(timeout=8000)
+            except PWTimeout:
+                art = page.locator('article[data-testid="tweet"]').first
+            await art.scroll_into_view_if_needed()
+            await page.wait_for_timeout(800)  # 给懒加载的配图喘口气
+            target = art
+        else:
+            if not url.startswith(BASE):
+                return {"ok": False, "error": "url 要么是推文链接,要么是 x.com 页面"}
+            await goto(page, url)
+            err = await wait_tweets(page)
+            if err and err != "EMPTY":
+                return {"ok": False, "error": err}
+            await page.wait_for_timeout(800)
+            target = None
+        shot_dir = Path(os.environ.get("TW_SHOT_DIR", "/tmp"))
+        shot_dir.mkdir(parents=True, exist_ok=True)
+        path = shot_dir / f"tw-shot-{sid or 'page'}-{int(time.time())}.png"
+        if target is not None:
+            await target.screenshot(path=str(path), timeout=15000)
+        else:
+            await page.screenshot(path=str(path))
+        return {"ok": True, "path": str(path), "url": page.url}
+    finally:
+        await _close_owned_page(page)
+
+
 # ---------- 写动作 ----------
 
 
@@ -1070,7 +1114,8 @@ async def act_post(ctx, body):
 
 # ---------- 路由 ----------
 
-READ_ACTIONS = {"feed": act_feed, "profile": act_profile, "read": act_read}
+READ_ACTIONS = {"feed": act_feed, "profile": act_profile, "read": act_read,
+                "shot": act_shot}
 WRITE_ACTIONS = {"like": act_like,
                  "unlike": lambda c, b: act_like(c, b, undo=True),
                  "repost": act_repost, "reply": act_reply, "post": act_post}
@@ -1178,4 +1223,4 @@ async def twitter(req: Request):
                         "result": result})
             return result
     return _failed(
-        f"不认识的 action: {action}。可用: feed/profile/read/like/unlike/repost/reply/post")
+        f"不认识的 action: {action}。可用: feed/profile/read/shot/like/unlike/repost/reply/post")
