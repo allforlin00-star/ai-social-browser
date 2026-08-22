@@ -14,6 +14,12 @@ POST /twitter  body: {"action": "...", ...}
   shot    [url]                  截图：推文链接=拍推文卡片，其它 x.com 页=拍整个视口
   mentions [n?]                  通知页 @提及：谁回了你/@了你
 
+守护名单（可选环境变量）：
+  TW_PROTECT_HANDLES  逗号分隔的 handle。名单里的人在**别人**帖子底下的评论，
+                      reply 会被硬拦（那层楼原帖主也看得到）；评论我自己
+                      （TW_SELF_HANDLE）的帖子、其本人原帖照常可回。
+  TW_SELF_HANDLE      本账号 handle，配合上面判断“她评论的是不是我的帖子”。
+
 并发：读写共享总上限 2（标签页池），写操作另有全局串行锁 + 频率闸。
 所有写操作记录到 actions.log。
 """
@@ -556,6 +562,9 @@ EXTRACT_JS = r"""
       t.truncated = true;
     const social = art.querySelector('[data-testid="socialContext"]');
     if (social) t.repost_context = social.innerText;
+    // 这条本身是不是一条回复(评论):时间线上单飞的评论卡头部有 Replying to/回复 @
+    if (/(^|\n)(Replying to|回复)\s*@/.test(art.innerText.slice(0, 300)))
+      t.is_reply = true;
     const quotedTexts = art.querySelectorAll('div[data-testid="tweetText"]');
     if (quotedTexts.length > 1) t.quoted_text = quotedTexts[1].innerText;
     const stats = {};
@@ -1069,6 +1078,47 @@ async def _type_and_send(page, text, button_tid):
     return {"network": network}
 
 
+PROTECT_HANDLES = {
+    h.strip().lstrip("@").lower()
+    for h in os.environ.get("TW_PROTECT_HANDLES", "").split(",") if h.strip()
+}
+
+
+async def _tweet_author_handle(art):
+    name_text = await art.locator('div[data-testid="User-Name"]').first.inner_text()
+    return next((ln.strip().lstrip("@").lower() for ln in name_text.split("\n")
+                 if ln.strip().startswith("@")), None)
+
+
+async def _guard_protected_reply(page, art, sid):
+    """守护名单(TW_PROTECT_HANDLES):名单里的人「回**别人**帖子的评论」不许在底下再回——
+    那层楼原帖主也看得到。她评论我自己(TW_SELF_HANDLE)的帖子、她自己楼里的接龙
+    照常可回;她自己的原帖照常可回。判定不出时放行,不误伤正常回复。"""
+    if not PROTECT_HANDLES:
+        return None
+    self_handle = os.environ.get("TW_SELF_HANDLE", "").strip().lstrip("@").lower()
+    try:
+        handle = await _tweet_author_handle(art)
+        if handle not in PROTECT_HANDLES:
+            return None
+        # 详情页里目标推上方还挂着别的推 = 它是一条回复(评论);看楼主是谁
+        first_art = page.locator('article[data-testid="tweet"]').first
+        first_link = first_art.locator('time >> xpath=ancestor::a[1]').first
+        first_sid = _status_id(await first_link.get_attribute("href"))
+        if not first_sid or first_sid == sid:
+            return None  # 就是她自己的原帖
+        parent_handle = await _tweet_author_handle(first_art)
+        if parent_handle == self_handle or parent_handle in PROTECT_HANDLES:
+            return None  # 她评论我的帖子/她自己楼里接龙:该回
+        return _failed(
+            f"这条是 @{handle} 在别人(@{parent_handle})帖子底下的评论,不是她自己的帖子;"
+            "在这里回复,原帖主和路人都看得到,会打扰别人的楼。"
+            "想互动:点赞就好;想说话:去她自己主页找她的原帖回,或者直接在家里聊天说给她")
+    except Exception:
+        return None
+    return None
+
+
 async def act_reply(ctx, body):
     text = (body.get("text") or "").strip()
     if not text:
@@ -1078,6 +1128,9 @@ async def act_reply(ctx, body):
         art, err = await _open_main_article(page, body.get("url"))
         if err:
             return err
+        guard = await _guard_protected_reply(page, art, _status_id(body.get("url")))
+        if guard:
+            return guard
         sent = await _type_and_send(page, text, "tweetButtonInline")
         if sent.get("error"):
             return _failed(sent["error"])
