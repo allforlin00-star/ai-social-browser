@@ -12,6 +12,7 @@ POST /twitter  body: {"action": "...", ...}
   reply   [url, text]
   post    [text]
   shot    [url]                  截图：推文链接=拍推文卡片，其它 x.com 页=拍整个视口
+  mentions [n?]                  通知页 @提及：谁回了你/@了你
 
 并发：读写共享总上限 2（标签页池），写操作另有全局串行锁 + 频率闸。
 所有写操作记录到 actions.log。
@@ -832,6 +833,24 @@ async def act_read(ctx, body):
         await _close_owned_page(page)
 
 
+async def act_mentions(ctx, body):
+    """看通知(原 VPS 裸补丁转正,与 shot 同案):通知页 @提及 tab,
+    谁回了他/@了他。卡片结构和时间线同款,复用同一套提取器。"""
+    n = min(int(body.get("n", 8)), 30)
+    page = await new_page(ctx, block_images=False)
+    try:
+        await goto(page, f"{BASE}/notifications/mentions")
+        err = await wait_tweets(page)
+        if err == "EMPTY":
+            return {"ok": True, "tweets": [], "note": "通知页没有新提及"}
+        if err:
+            return {"ok": False, "error": err}
+        tweets = await collect_tweets(page, n)
+        return {"ok": True, "source": "mentions", "tweets": tweets}
+    finally:
+        await _close_owned_page(page)
+
+
 async def act_shot(ctx, body):
     """叼石头截图(feat-stone-shot,原 VPS 裸补丁转正):把推文拍成 PNG 落盘,
     返回 path 给调用方(pando-bridge 的 stone_shot.py)自取。纯读取,不进频率闸。"""
@@ -1115,7 +1134,7 @@ async def act_post(ctx, body):
 # ---------- 路由 ----------
 
 READ_ACTIONS = {"feed": act_feed, "profile": act_profile, "read": act_read,
-                "shot": act_shot}
+                "shot": act_shot, "mentions": act_mentions}
 WRITE_ACTIONS = {"like": act_like,
                  "unlike": lambda c, b: act_like(c, b, undo=True),
                  "repost": act_repost, "reply": act_reply, "post": act_post}
@@ -1223,4 +1242,4 @@ async def twitter(req: Request):
                         "result": result})
             return result
     return _failed(
-        f"不认识的 action: {action}。可用: feed/profile/read/shot/like/unlike/repost/reply/post")
+        f"不认识的 action: {action}。可用: feed/profile/read/shot/mentions/like/unlike/repost/reply/post")
